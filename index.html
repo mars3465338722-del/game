@@ -386,7 +386,7 @@ function startAttack(name) {
   playSound(name);   // 切到 attack1/attack2/attack3 的瞬间播放对应音效
 }
 
-// 闪避：E 向前 / Q 向后；前 0.25s 以 900px/s 冲刺，后 0.15s 减速到 0；期间无敌；0.8s 冷却
+// 闪避：向前=沿角色当前朝向 / 向后=与朝向相反；前 0.25s 以 900px/s 冲刺，后 0.15s 减速到 0；期间无敌；0.8s 冷却
 const DODGE_TIME = 0.4, DODGE_COOLDOWN = 0.8, DODGE_SPEED = 900, DODGE_FAST = 0.25;
 function startDodge(name) {
   if (player.dead || player.dieDone) return;
@@ -560,14 +560,14 @@ window.addEventListener('keydown', e => {
   }
   if (!e.repeat) {                             // 边沿触发：每次按下只触发一次
     if (e.code === 'KeyA' || e.code === 'KeyD') registerTap(e.code);   // 双击 A/D 奔跑
-    // 闪避：Shift+D 向前 / Shift+A 向后 / 单独 Shift 向后
+    // 闪避：Shift+D 向前 / Shift+A 向前（始终沿当前朝向）/ 单独 Shift 向后（与朝向相反）
     if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
       if (keys.KeyD) startDodge('dodge_forward');        // 先按 D 再按 Shift
-      else if (keys.KeyA) startDodge('dodge_backward');  // 先按 A 再按 Shift
-      else startDodge('dodge_backward');                 // 单独按 Shift：向后闪避
+      else if (keys.KeyA) startDodge('dodge_forward');   // 先按 A 再按 Shift：向前闪避（沿当前朝向）
+      else startDodge('dodge_backward');                 // 单独按 Shift：向后闪避（与朝向相反）
     }
     else if (e.code === 'KeyD' && e.shiftKey) startDodge('dodge_forward');   // 先按 Shift 再按 D
-    else if (e.code === 'KeyA' && e.shiftKey) startDodge('dodge_backward');  // 先按 Shift 再按 A
+    else if (e.code === 'KeyA' && e.shiftKey) startDodge('dodge_forward');   // 先按 Shift 再按 A：向前闪避（沿当前朝向）
   }
   keys[e.code] = true;
   if (e.code === 'Space') e.preventDefault();
