@@ -154,6 +154,8 @@ const ANIM = {
   hurt:              { fps: 10, loop: false },
   die:               { fps: 8,  loop: false },
   trans_idle_to_run: { fps: 12, loop: false },
+  dodge_forward:    { fps: 25, loop: false },   // 10 帧 / 0.4s
+  dodge_backward:   { fps: 18, loop: false },   //  7 帧 / 0.4s
   enemyWalk:   { fps: 10, loop: true  },
   enemyAttack: { fps: 10, loop: false },
   enemyHurt:   { fps: 10, loop: false },
@@ -176,6 +178,7 @@ const ENEMY_ATTACK = { frames: 5, activeFrom: 2, activeTo: 3, w: 120, h: 75, yOf
 const PLAYER_ANIM_DEFS = {
   idle: 8, walk: 13, run: 14, attack1: 12, attack2: 4, attack3: 10,
   hurt: 4, die: 10, trans_idle_to_run: 3, jump_up: 7, jump_down: 6,
+  dodge_forward: 10, dodge_backward: 7,
 };
 const ENEMY_ANIM_DEFS = { walk: 6, attack: 5, hurt: 4, die: 7 };
 
@@ -259,6 +262,8 @@ const sounds = {
   enemy_die:     new Audio('assets/player/sounds/enemy_die.mp3'),
   footstep_walk: new Audio('assets/player/sounds/footstep_walk.mp3'),
   footstep_run:  new Audio('assets/player/sounds/footstep_run.mp3'),
+  dodge_forward:  new Audio('assets/player/sounds/dodge_forward.mp3'),
+  dodge_backward: new Audio('assets/player/sounds/dodge_backward.mp3'),
 };
 const lastSoundTime = Object.create(null);   // 每个音效上次播放时间戳（50ms 防重复叠加）
 function playSound(name) {
@@ -313,6 +318,8 @@ const player = {
   hurtT: 0,          // 受击动画剩余时间
   flashT: 0,         // 红闪剩余时间
   invulnT: 0,        // 受击无敌
+  dodgeT: 0,         // 闪避动画剩余时间
+  dodgeCd: 0,        // 闪避冷却剩余时间
   dead: false,
   dieDone: false,
 };
@@ -328,6 +335,7 @@ function resetPlayer() {
   player.animTime = 0;
   player.segHits = null;
   player.hurtT = 0; player.flashT = 0; player.invulnT = 0;
+  player.dodgeT = 0; player.dodgeCd = 0;
   player.dead = false; player.dieDone = false;
 }
 
@@ -372,6 +380,20 @@ function startAttack(name) {
   playSound(name);   // 切到 attack1/attack2/attack3 的瞬间播放对应音效
 }
 
+// 闪避：E 向前 / Q 向后；前 0.25s 以 900px/s 冲刺，后 0.15s 减速到 0；期间无敌；0.8s 冷却
+const DODGE_TIME = 0.4, DODGE_COOLDOWN = 0.8, DODGE_SPEED = 900, DODGE_FAST = 0.25;
+function startDodge(name) {
+  if (player.dead || player.dieDone) return;
+  if (player.state === 'dodge_forward' || player.state === 'dodge_backward') return;   // 闪避中不重复触发
+  if (player.dodgeCd > 0) return;                                                    // 冷却中
+  player.state = name;
+  player.animTime = 0;
+  player.dodgeT = DODGE_TIME;
+  player.dodgeCd = DODGE_COOLDOWN;
+  player.invulnT = Math.max(player.invulnT, DODGE_TIME);   // 闪避期间无敌（复用受击无敌计时器，不伤血）
+  playSound(name);   // 切到 dodge_forward/dodge_backward 的瞬间播放对应音效
+}
+
 function damagePlayer(dmg, fromX) {
   if (player.dead || player.invulnT > 0) return;
   player.hp = Math.max(0, player.hp - dmg);
@@ -394,6 +416,7 @@ function playerUpdate(dt) {
   // 计时器
   if (player.invulnT > 0) player.invulnT -= dt;
   if (player.flashT > 0) player.flashT -= dt;
+  if (player.dodgeCd > 0) player.dodgeCd -= dt;
   player.animTime += dt;
 
   // 死亡：播完保持最后一帧
@@ -415,6 +438,13 @@ function playerUpdate(dt) {
     const n = ASSETS.player.trans_idle_to_run.length;
     const f = Math.floor(player.animTime * ANIM.trans_idle_to_run.fps);
     if (f >= n) { player.state = 'run'; player.animTime = 0; }
+  } else if (player.state === 'dodge_forward' || player.state === 'dodge_backward') {
+    // 闪避中：0.25s 以 900px/s 前/后冲刺，后 0.15s 速度线性减为 0；不处理输入（不能攻击/跳跃/移动）；播完回 idle
+    player.dodgeT -= dt;
+    const dir = (player.state === 'dodge_forward') ? player.facing : -player.facing;
+    player.vx = (player.dodgeT > DODGE_FAST) ? dir * DODGE_SPEED
+                                             : dir * DODGE_SPEED * Math.max(0, player.dodgeT / DODGE_FAST);
+    if (player.dodgeT <= 0) { player.state = 'idle'; player.animTime = 0; player.vx = 0; }
   } else {
     // idle / walk / run / jump_up / jump_down：自由移动
     let move = 0;
@@ -520,6 +550,10 @@ window.addEventListener('keydown', e => {
     spawnTimer = 1;
     cameraX = Math.max(0, Math.min(Math.max(0, worldW - CANVAS_W), player.x - CANVAS_W / 2));
     return;
+  }
+  if (!e.repeat) {                             // 闪避边沿触发：每次按下只触发一次
+    if (e.code === 'KeyE') startDodge('dodge_forward');     // E：向前闪避
+    else if (e.code === 'KeyQ') startDodge('dodge_backward'); // Q：向后闪避
   }
   keys[e.code] = true;
   if (e.code === 'Space') e.preventDefault();
