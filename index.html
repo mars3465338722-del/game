@@ -295,14 +295,19 @@ function updateFootsteps(dt) {
 // ============================================================
 const keys = Object.create(null);
 
-function shiftHeld() {
-  return !!(keys.ShiftLeft || keys.ShiftRight);
+// 奔跑：双击 A 或 D 进入奔跑模式，停下（回 idle）时清除
+const DOUBLE_TAP_WINDOW = 0.3;   // 双击判定窗口（秒）
+const lastTapTime = Object.create(null);
+function registerTap(code) {
+  const now = performance.now();
+  if (lastTapTime[code] !== undefined && now - lastTapTime[code] <= DOUBLE_TAP_WINDOW * 1000) player.runMode = true;
+  lastTapTime[code] = now;
 }
 
 function groundStateFromSpeed() {
   const s = Math.abs(player.vx);
   if (s < 8) return 'idle';
-  return shiftHeld() ? 'run' : 'walk';
+  return player.runMode ? 'run' : 'walk';
 }
 
 const player = {
@@ -320,6 +325,7 @@ const player = {
   invulnT: 0,        // 受击无敌
   dodgeT: 0,         // 闪避动画剩余时间
   dodgeCd: 0,        // 闪避冷却剩余时间
+  runMode: false,    // 奔跑模式（双击 A/D 开启）
   dead: false,
   dieDone: false,
 };
@@ -335,7 +341,7 @@ function resetPlayer() {
   player.animTime = 0;
   player.segHits = null;
   player.hurtT = 0; player.flashT = 0; player.invulnT = 0;
-  player.dodgeT = 0; player.dodgeCd = 0;
+  player.dodgeT = 0; player.dodgeCd = 0; player.runMode = false;
   player.dead = false; player.dieDone = false;
 }
 
@@ -451,7 +457,7 @@ function playerUpdate(dt) {
     if (keys.KeyA) move -= 1;
     if (keys.KeyD) move += 1;
     if (move !== 0) {
-      const max = shiftHeld() ? MAX_RUN : MAX_WALK;   // 按住 Shift 才能达到奔跑速度
+      const max = player.runMode ? MAX_RUN : MAX_WALK;   // 按住 Shift 才能达到奔跑速度
       player.vx += move * MOVE_ACC * dt;
       const cap = Math.max(max, 60);
       if (player.vx >  cap) player.vx =  cap;
@@ -496,6 +502,7 @@ function playerUpdate(dt) {
       const stillMove = (player.state === 'idle' || player.state === 'walk' || player.state === 'run');
       if (stillMove) {
         const s = groundStateFromSpeed();
+        if (s === 'idle') player.runMode = false;   // 停下即清除奔跑模式
         if (player.state !== s) {
           // 待机 → 跑步：播放过渡帧
           if (player.state === 'idle' && s === 'run') {
@@ -551,14 +558,22 @@ window.addEventListener('keydown', e => {
     cameraX = Math.max(0, Math.min(Math.max(0, worldW - CANVAS_W), player.x - CANVAS_W / 2));
     return;
   }
-  if (!e.repeat) {                             // 闪避边沿触发：每次按下只触发一次
-    if (e.code === 'KeyE') startDodge('dodge_forward');     // E：向前闪避
-    else if (e.code === 'KeyQ') startDodge('dodge_backward'); // Q：向后闪避
+  if (!e.repeat) {                             // 边沿触发：每次按下只触发一次
+    if (e.code === 'KeyA' || e.code === 'KeyD') registerTap(e.code);   // 双击 A/D 奔跑
+    // 闪避：Shift+D 向前 / Shift+A 向后 / 单独 Shift 向后
+    if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+      if (keys.KeyD) startDodge('dodge_forward');        // 先按 D 再按 Shift
+      else if (keys.KeyA) startDodge('dodge_backward');  // 先按 A 再按 Shift
+      else startDodge('dodge_backward');                 // 单独按 Shift：向后闪避
+    }
+    else if (e.code === 'KeyD' && e.shiftKey) startDodge('dodge_forward');   // 先按 Shift 再按 D
+    else if (e.code === 'KeyA' && e.shiftKey) startDodge('dodge_backward');  // 先按 Shift 再按 A
   }
   keys[e.code] = true;
   if (e.code === 'Space') e.preventDefault();
 });
 window.addEventListener('keyup', e => { keys[e.code] = false; });
+window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });  // 窗口失焦时清空按键（修复按 Alt 等导致按键卡死、动不了的问题）
 
 // ============================================================
 // 第四块：敌人 AI、碰撞检测、受击反馈
