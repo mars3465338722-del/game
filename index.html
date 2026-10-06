@@ -1,0 +1,1008 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>横版卷轴动作游戏原型</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    background: #111;
+    overflow: hidden;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: Consolas, "Courier New", monospace;
+  }
+
+  /* 画布：内部 1920×1080，CSS 等比缩放到视口 */
+  #game {
+    display: block;
+    background: #000;
+    width: min(100vw, 177.7778vh);   /* 16:9 */
+    height: min(100vh, 56.25vw);
+  }
+
+  /* 加载遮罩 */
+  #loading {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #111;
+    color: #eee;
+    font-size: 18px;
+    letter-spacing: 2px;
+    z-index: 10;
+  }
+  #loading.done { display: none; }
+
+  /* 调试面板 */
+  #debug-panel {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    width: 232px;
+    background: rgba(10, 10, 10, 0.82);
+    border: 1px solid #3a3a3a;
+    border-radius: 6px;
+    color: #cfcfcf;
+    font-size: 12px;
+    padding: 10px 12px;
+    z-index: 20;
+    user-select: none;
+  }
+  #debug-panel.hidden { display: none; }
+  #debug-panel h3 {
+    font-size: 13px;
+    margin-bottom: 8px;
+    color: #8f8;
+    font-weight: bold;
+  }
+  #debug-panel .row { margin-bottom: 8px; }
+  #debug-panel label { display: block; margin-bottom: 2px; }
+  #debug-panel input[type="range"] { width: 100%; }
+  #debug-panel .val { float: right; color: #ff5; }
+  #debug-panel .hint {
+    color: #777;
+    font-size: 11px;
+    margin-top: 6px;
+  }
+</style>
+</head>
+<body>
+  <canvas id="game" width="1920" height="1080"></canvas>
+
+  <!-- 素材加载遮罩 -->
+  <div id="loading">正在加载素材...</div>
+
+  <!-- 调试面板：按 ~ 键切换，默认隐藏 -->
+  <div id="debug-panel" class="hidden">
+    <h3>调试面板（按 ~ 键切换）</h3>
+    <div class="row">
+      <label>平台 Y <span class="val" id="val-platformY">920</span></label>
+      <input type="range" id="dbg-platformY" min="0" max="1080" step="1" value="920">
+    </div>
+    <div class="row">
+      <label>玩家宽 <span class="val" id="val-playerW">96</span></label>
+      <input type="range" id="dbg-playerW" min="20" max="400" step="1" value="96">
+    </div>
+    <div class="row">
+      <label>玩家高 <span class="val" id="val-playerH">307</span></label>
+      <input type="range" id="dbg-playerH" min="20" max="600" step="1" value="307">
+    </div>
+    <div class="row">
+      <label>敌人体积 <span class="val" id="val-enemySize">2.00</span></label>
+      <input type="range" id="dbg-enemySize" min="0.5" max="5.0" step="0.1" value="2.0">
+    </div>
+    <div class="row">
+      <label>最大敌人数 <span class="val" id="val-maxEnemies">1</span></label>
+      <input type="range" id="dbg-maxEnemies" min="1" max="10" step="1" value="1">
+    </div>
+    <div class="hint">调试图形仅为可视化叠加，不影响物理和碰撞；滑块调整实时生效。</div>
+  </div>
+
+<script>
+"use strict";
+// ============================================================
+// 第二块：常量定义 + 素材加载代码
+// ============================================================
+const CANVAS_W = 1920, CANVAS_H = 1080;
+const FIXED_DT = 1 / 60;
+const PLAYER_SCALE = 0.32;            // 1024 * 0.32 = 327.68px 绘制尺寸
+const ENEMY_SCALE  = 0.32;
+
+const GRAVITY      = 2200;
+const JUMP_SPEED   = 880;
+const MAX_WALK     = 200;              // 轻按方向的参考速度
+const MAX_RUN      = 340;
+const RUN_THRESHOLD= 260;              // |vx| > 260 时摩擦衰减更慢（仅用于摩擦系数）
+const MOVE_ACC     = 1400;
+const FRICTION     = 1600;
+const ENEMY_SPEED  = 110;              // 敌人巡逻速度
+const ENEMY_ATTACK_RANGE = 170;        // 玩家进入该水平距离触发近战
+const ENEMY_ATTACK_CD    = 1.2;        // 攻击后冷却
+const ENEMY_HURT_KB      = 260;        // 受击击退速度
+const PLAYER_HURT_KB     = 320;
+const ENEMY_BASE_W       = 64;         // 敌人体盒基础宽（× 敌人体积）
+const ENEMY_BASE_H       = 140;        // 敌人体盒基础高（× 敌人体积）
+
+const DEBUG = {
+  enabled: false,
+  platformY: 920,      // 平台顶面 Y（默认 920）
+  playerW: 96,
+  playerH: 307,
+  enemySize: 2.0,      // 敌人体积倍率
+  maxEnemies: 1,
+};
+
+// 各动画帧率
+const ANIM = {
+  idle:              { fps: 12, loop: true  },
+  walk:              { fps: 14, loop: true  },
+  run:               { fps: 16, loop: true  },
+  jump_up:           { fps: 14, loop: false },
+  jump_down:         { fps: 14, loop: false },
+  attack1:           { fps: 12, loop: false },
+  attack2:           { fps: 12, loop: false },
+  attack3:           { fps: 12, loop: false },
+  hurt:              { fps: 10, loop: false },
+  die:               { fps: 8,  loop: false },
+  trans_idle_to_run: { fps: 12, loop: false },
+  enemyWalk:   { fps: 10, loop: true  },
+  enemyAttack: { fps: 10, loop: false },
+  enemyHurt:   { fps: 10, loop: false },
+  enemyDie:    { fps: 8,  loop: false },
+};
+
+// 攻击盒（相对玩家中心，朝 facing 方向）
+// combo: 激活帧段列表 [from, to]（帧下标，含两端），每段可独立命中一次
+//   attack1: 12 帧，连续三段攻击：1-3 / 5-7 / 9-11，每段 8 伤害
+//   attack2:  4 帧，仅最后一帧（3）造成伤害
+//   attack3: 10 帧，仅第 5 帧（下标 4）造成伤害
+const ATTACKS = {
+  attack1: { frames: 12, combo: [[1, 3], [5, 7], [9, 11]], w: 120, h: 70, yOff: 0.55, dmg: 8 },
+  attack2: { frames: 4,  combo: [[3, 3]],                 w: 95,  h: 60, yOff: 0.55, dmg: 12 },
+  attack3: { frames: 10, combo: [[4, 4]],                 w: 150, h: 95, yOff: 0.50, dmg: 25 },
+};
+const ENEMY_ATTACK = { frames: 5, activeFrom: 2, activeTo: 3, w: 120, h: 75, yOff: 0.55, dmg: 20 };
+
+// 素材帧数（直接按题目给定数字）
+const PLAYER_ANIM_DEFS = {
+  idle: 8, walk: 13, run: 14, attack1: 12, attack2: 4, attack3: 10,
+  hurt: 4, die: 10, trans_idle_to_run: 3, jump_up: 7, jump_down: 6,
+};
+const ENEMY_ANIM_DEFS = { walk: 6, attack: 5, hurt: 4, die: 7 };
+
+const ASSETS = { player: {}, enemy: {} };
+let bgFar = null, bgNear = null;                // 两层视差背景（远/近）
+
+function loadAllEntries() {
+  const entries = [];
+  for (const name in PLAYER_ANIM_DEFS) {
+    const n = PLAYER_ANIM_DEFS[name];
+    for (let i = 1; i <= n; i++) entries.push({ key: 'p:' + name + ':' + i, url: 'assets/player/' + name + '/' + i + '.png' });
+  }
+  for (const name in ENEMY_ANIM_DEFS) {
+    const n = ENEMY_ANIM_DEFS[name];
+    for (let i = 1; i <= n; i++) entries.push({ key: 'e:' + name + ':' + i, url: 'assets/enemies/minotaur/' + name + '/' + i + '.png' });
+  }
+  entries.push({ key: 'bgFar',  url: 'assets/background/bg_far.png' });
+  entries.push({ key: 'bgNear', url: 'assets/background/bg_near.png' });
+  return entries;
+}
+
+function loadImages(entries) {
+  return new Promise(resolve => {
+    if (!entries.length) { resolve({}); return; }
+    let remaining = entries.length;
+    const imgs = {};
+    entries.forEach(e => {
+      const img = new Image();
+      const done = () => {
+        imgs[e.key] = img;
+        if (--remaining === 0) resolve(imgs);
+      };
+      img.onload = done;
+      img.onerror = () => { console.error('素材加载失败: ' + e.url); done(); };
+      img.src = e.url;
+    });
+  });
+}
+
+function getFrame(frames, index) {
+  if (!frames || !frames.length) return null;
+  return frames[Math.max(0, Math.min(index, frames.length - 1))];
+}
+
+async function loadAll() {
+  const imgs = await loadImages(loadAllEntries());
+  for (const name in PLAYER_ANIM_DEFS) {
+    const frames = [];
+    for (let i = 1; i <= PLAYER_ANIM_DEFS[name]; i++) frames.push(imgs['p:' + name + ':' + i]);
+    ASSETS.player[name] = frames;
+  }
+  for (const name in ENEMY_ANIM_DEFS) {
+    const frames = [];
+    for (let i = 1; i <= ENEMY_ANIM_DEFS[name]; i++) frames.push(imgs['e:' + name + ':' + i]);
+    ASSETS.enemy[name] = frames;
+  }
+  bgFar = imgs['bgFar'];
+  bgNear = imgs['bgNear'];
+}
+
+let worldW = 8000;   // 世界宽度 = 近景层按 1080 高缩放后的宽度
+function computeWorldW() {
+  if (bgNear && bgNear.width > 0 && bgNear.height > 0) {
+    worldW = bgNear.width * (CANVAS_H / bgNear.height);
+  } else {
+    worldW = 8000;
+  }
+}
+
+// ============================================================
+// 音效：预加载 + 播放（不改动素材加载流程，独立 new Audio 预加载）
+// ============================================================
+const sounds = {
+  attack1:       new Audio('assets/player/sounds/attack1.mp3'),
+  attack2:       new Audio('assets/player/sounds/attack2.mp3'),
+  attack3:       new Audio('assets/player/sounds/attack3.mp3'),
+  jump:          new Audio('assets/player/sounds/jump.mp3'),
+  player_hurt:   new Audio('assets/player/sounds/player_hurt.mp3'),
+  player_die:    new Audio('assets/player/sounds/player_die.mp3'),
+  enemy_hurt:    new Audio('assets/player/sounds/enemy_hurt.mp3'),
+  enemy_die:     new Audio('assets/player/sounds/enemy_die.mp3'),
+  footstep_walk: new Audio('assets/player/sounds/footstep_walk.mp3'),
+  footstep_run:  new Audio('assets/player/sounds/footstep_run.mp3'),
+};
+const lastSoundTime = Object.create(null);   // 每个音效上次播放时间戳（50ms 防重复叠加）
+function playSound(name) {
+  const a = sounds[name];
+  if (!a) return;
+  const now = performance.now();
+  if (lastSoundTime[name] !== undefined && now - lastSoundTime[name] < 50) return;  // 50ms 内不重复
+  lastSoundTime[name] = now;
+  a.currentTime = 0;                                    // 每次播放从头开始
+  const p = a.play();
+  if (p && typeof p.catch === 'function') p.catch(() => {});   // 吞掉浏览器自动播放拒绝
+}
+
+// 脚步声：走路每 0.5s、跑步每 0.3s；非 walk/run（含 idle）时停止
+const FOOTSTEP_INTERVAL = { walk: 0.5, run: 0.3 };
+let footstepTimer = 0;
+function updateFootsteps(dt) {
+  if (player.state !== 'walk' && player.state !== 'run') { footstepTimer = 0; return; }
+  const interval = FOOTSTEP_INTERVAL[player.state];
+  footstepTimer += dt;
+  while (footstepTimer >= interval) {
+    footstepTimer -= interval;
+    playSound(player.state === 'walk' ? 'footstep_walk' : 'footstep_run');
+  }
+}
+
+// ============================================================
+// 第三块：玩家对象、物理、输入控制
+// ============================================================
+const keys = Object.create(null);
+
+function shiftHeld() {
+  return !!(keys.ShiftLeft || keys.ShiftRight);
+}
+
+function groundStateFromSpeed() {
+  const s = Math.abs(player.vx);
+  if (s < 8) return 'idle';
+  return shiftHeld() ? 'run' : 'walk';
+}
+
+const player = {
+  x: 300,            // 水平中心
+  y: DEBUG.platformY, // 脚底 Y
+  vx: 0, vy: 0,
+  facing: 1,         // 1 朝右，-1 朝左
+  onGround: true,
+  hp: 100, maxHp: 100,
+  state: 'idle',
+  animTime: 0,
+  segHits: null,  // 当前攻击已命中的敌人集合
+  hurtT: 0,          // 受击动画剩余时间
+  flashT: 0,         // 红闪剩余时间
+  invulnT: 0,        // 受击无敌
+  dead: false,
+  dieDone: false,
+};
+
+function resetPlayer() {
+  player.x = 300;
+  player.y = DEBUG.platformY;
+  player.vx = 0; player.vy = 0;
+  player.facing = 1;
+  player.onGround = true;
+  player.hp = player.maxHp;
+  player.state = 'idle';
+  player.animTime = 0;
+  player.segHits = null;
+  player.hurtT = 0; player.flashT = 0; player.invulnT = 0;
+  player.dead = false; player.dieDone = false;
+}
+
+function getAnimState() {
+  // 根据当前状态得到实际播放的动画名
+  return player.state;
+}
+
+function playerBodyBox() {
+  return { x: player.x - DEBUG.playerW / 2, y: player.y - DEBUG.playerH, w: DEBUG.playerW, h: DEBUG.playerH };
+}
+
+function playerAttackBox() {
+  if (player.state !== 'attack1' && player.state !== 'attack2' && player.state !== 'attack3') return null;
+  const atk = ATTACKS[player.state];
+  const idx = animFrameOf(player.state);
+  let seg = -1;
+  for (let i = 0; i < atk.combo.length; i++) {
+    if (idx >= atk.combo[i][0] && idx <= atk.combo[i][1]) { seg = i; break; }
+  }
+  if (seg === -1) return null;
+  const yCenter = player.y - DEBUG.playerH * atk.yOff;
+  const x = player.facing >= 0 ? player.x + 10 : player.x - 10 - atk.w;
+  return { x: x, y: yCenter - atk.h / 2, w: atk.w, h: atk.h, seg: seg };
+}
+
+function animFrameOf(state) {
+  const def = ANIM[state];
+  const frames = (state.startsWith('enemy') ? ASSETS.enemy : ASSETS.player)[state.replace(/^enemy/, '')];
+  const n = frames ? frames.length : def.frames;
+  const f = Math.floor(player.animTime * def.fps);
+  return def.loop ? f % n : Math.min(f, n - 1);
+}
+
+function startAttack(name) {
+  if (player.dead || player.dieDone) return;
+  if (player.state === 'hurt' || player.state === 'die') return;
+  if (player.state === 'attack1' || player.state === 'attack2' || player.state === 'attack3') return;
+  player.state = name;
+  player.animTime = 0;
+  player.segHits = ATTACKS[name].combo.map(() => new Set());
+  playSound(name);   // 切到 attack1/attack2/attack3 的瞬间播放对应音效
+}
+
+function damagePlayer(dmg, fromX) {
+  if (player.dead || player.invulnT > 0) return;
+  player.hp = Math.max(0, player.hp - dmg);
+  player.invulnT = 0.5;      // 短暂无敌，防止被多敌同时打空血
+  player.flashT = 0.35;     // 红闪
+  player.vx = (player.x < fromX ? -1 : 1) * PLAYER_HURT_KB; // 水平击退
+  if (player.hp <= 0) {
+    player.dead = true;
+    player.state = 'die';
+    player.animTime = 0;
+    player.dieDone = false;
+    playSound('player_die');   // 血归零、切 die 的瞬间（死亡音优先，不叠受击音）
+  } else {
+    playSound('player_hurt');  // 受击、血量减少的瞬间
+  }
+  // 无僵直：受击不改状态，玩家可立即移动/跳跃/攻击
+}
+
+function playerUpdate(dt) {
+  // 计时器
+  if (player.invulnT > 0) player.invulnT -= dt;
+  if (player.flashT > 0) player.flashT -= dt;
+  player.animTime += dt;
+
+  // 死亡：播完保持最后一帧
+  if (player.state === 'die') {
+    const n = ASSETS.player.die.length;
+    if (Math.floor(player.animTime * ANIM.die.fps) >= n) player.dieDone = true;
+    player.vx = 0;
+  } else if (player.state === 'hurt') {
+    player.hurtT -= dt;
+    player.vx *= Math.max(0, 1 - 4 * dt);
+    if (player.hurtT <= 0) { player.state = player.onGround ? groundStateFromSpeed() : (player.vy < 0 ? 'jump_up' : 'jump_down'); player.animTime = 0; }
+  } else if (player.state === 'attack1' || player.state === 'attack2' || player.state === 'attack3') {
+    const def = ANIM[player.state];
+    const n = ASSETS.player[player.state].length;
+    const f = Math.floor(player.animTime * def.fps);
+    player.vx *= Math.max(0, 1 - 6 * dt);
+    if (f >= n) { player.state = player.onGround ? groundStateFromSpeed() : (player.vy < 0 ? 'jump_up' : 'jump_down'); player.animTime = 0; }
+  } else if (player.state === 'trans_idle_to_run') {
+    const n = ASSETS.player.trans_idle_to_run.length;
+    const f = Math.floor(player.animTime * ANIM.trans_idle_to_run.fps);
+    if (f >= n) { player.state = 'run'; player.animTime = 0; }
+  } else {
+    // idle / walk / run / jump_up / jump_down：自由移动
+    let move = 0;
+    if (keys.KeyA) move -= 1;
+    if (keys.KeyD) move += 1;
+    if (move !== 0) {
+      const max = shiftHeld() ? MAX_RUN : MAX_WALK;   // 按住 Shift 才能达到奔跑速度
+      player.vx += move * MOVE_ACC * dt;
+      const cap = Math.max(max, 60);
+      if (player.vx >  cap) player.vx =  cap;
+      if (player.vx < -cap) player.vx = -cap;
+      player.facing = move > 0 ? 1 : -1;
+    } else {
+      const f = Math.abs(player.vx) > RUN_THRESHOLD ? 6 : 8;
+      if (player.vx > 0) player.vx = Math.max(0, player.vx - FRICTION * f * dt);
+      else player.vx = Math.min(0, player.vx + FRICTION * f * dt);
+    }
+
+    if (keys.Space && player.onGround) {
+      player.vy = -JUMP_SPEED;
+      player.onGround = false;
+      player.state = 'jump_up';     // 起跳进入上升段
+      player.animTime = 0;
+      playSound('jump');           // 起跳音效
+    }
+
+    if (keys.KeyJ) startAttack('attack1');
+    if (keys.KeyK) startAttack('attack2');
+    if (keys.KeyL) startAttack('attack3');
+
+    // 跳跃动画推进：播完后的状态切换
+    if (player.state === 'jump_up') {
+      const n = ASSETS.player.jump_up.length;
+      if (Math.floor(player.animTime * ANIM.jump_up.fps) >= n) {
+        if (player.onGround) { player.state = 'idle'; player.animTime = 0; }      // 已落地 → idle
+        else { player.state = 'jump_down'; player.animTime = 0; }                // 仍在空中 → 下降段
+      }
+    } else if (player.state === 'jump_down') {
+      const n = ASSETS.player.jump_down.length;
+      if (Math.floor(player.animTime * ANIM.jump_down.fps) >= n) {
+        if (player.onGround) { player.state = 'idle'; player.animTime = 0; }     // 已落地 → idle
+        // 仍在空中：停在最后一帧（状态不变，动画钳制在末帧等待落地）
+      }
+    }
+
+    if (player.onGround) {
+      // 仅当仍处于移动状态时才重新推导状态；
+      // 本帧若刚切到 attack1/2/3，这里不得覆盖
+      const stillMove = (player.state === 'idle' || player.state === 'walk' || player.state === 'run');
+      if (stillMove) {
+        const s = groundStateFromSpeed();
+        if (player.state !== s) {
+          // 待机 → 跑步：播放过渡帧
+          if (player.state === 'idle' && s === 'run') {
+            player.state = 'trans_idle_to_run';
+            player.animTime = 0;
+          } else {
+            player.state = s;
+            player.animTime = 0;
+          }
+        }
+      }
+    } else {
+      if (player.state === 'idle' || player.state === 'walk' || player.state === 'run') {
+        player.state = 'jump_up';
+        player.animTime = 0;
+      }
+    }
+  }
+
+  // 物理
+  player.vy += GRAVITY * dt;
+  player.x += player.vx * dt;
+  player.y += player.vy * dt;
+
+  const groundY = DEBUG.platformY;
+  if (player.y >= groundY) {
+    player.y = groundY;
+    player.vy = 0;
+    if (!player.onGround) player.onGround = true;
+    // 落地不立即切状态：由跳跃动画播完检查统一处理
+    // （jump_up/jump_down 播完后：已落地 → idle，仍在空中 → 停末帧）
+  } else {
+    player.onGround = false;
+  }
+
+  // 世界边界
+  const margin = 40;
+  if (player.x < margin) { player.x = margin; if (player.vx < 0) player.vx = 0; }
+  if (player.x > worldW - margin) { player.x = worldW - margin; if (player.vx > 0) player.vx = 0; }
+}
+
+// 输入
+window.addEventListener('keydown', e => {
+  if (e.code === 'Backquote') {           // ~ 键切换调试
+    DEBUG.enabled = !DEBUG.enabled;
+    document.getElementById('debug-panel').classList.toggle('hidden', !DEBUG.enabled);
+    return;
+  }
+  if (e.code === 'KeyR' && player.dieDone) {   // 死亡后按 R 重新开始
+    resetPlayer();
+    enemies.length = 0;
+    spawnTimer = 1;
+    cameraX = Math.max(0, Math.min(Math.max(0, worldW - CANVAS_W), player.x - CANVAS_W / 2));
+    return;
+  }
+  keys[e.code] = true;
+  if (e.code === 'Space') e.preventDefault();
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// ============================================================
+// 第四块：敌人 AI、碰撞检测、受击反馈
+// ============================================================
+let enemies = [];
+let spawnTimer = 0;
+let enemySeq = 0;
+
+function enemyBodyBox(en) {
+  const w = ENEMY_BASE_W * DEBUG.enemySize;
+  const h = ENEMY_BASE_H * DEBUG.enemySize;
+  return { x: en.x - w / 2, y: en.y - h, w: w, h: h };
+}
+
+function enemyAttackBox(en) {
+  if (en.state !== 'attack') return null;
+  const idx = Math.floor(en.animTime * ANIM.enemyAttack.fps);
+  if (idx < ENEMY_ATTACK.activeFrom || idx > ENEMY_ATTACK.activeTo) return null;
+  const w = ENEMY_ATTACK.w * DEBUG.enemySize;
+  const h = ENEMY_ATTACK.h * DEBUG.enemySize;
+  const yCenter = en.y - (ENEMY_BASE_H * DEBUG.enemySize) * ENEMY_ATTACK.yOff;
+  if (en.facing >= 0) return { x: en.x + 8, y: yCenter - h / 2, w: w, h: h };
+  return { x: en.x - 8 - w, y: yCenter - h / 2, w: w, h: h };
+}
+
+function rectsOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function spawnEnemy() {
+  if (enemies.length >= DEBUG.maxEnemies) return;
+  let x = 0, tries = 0;
+  do {
+    x = margin2() + Math.random() * (worldW - margin2() * 2);
+    tries++;
+  } while (Math.abs(x - player.x) < 420 && tries < 20);
+  enemies.push({
+    id: enemySeq++,
+    x: x,
+    y: DEBUG.platformY,
+    vx: 0, vy: 0,
+    facing: Math.random() < 0.5 ? -1 : 1,
+    hp: 30,
+    state: 'walk',
+    animTime: 0,
+    hurtT: 0,
+    flashT: 0,
+    atkCd: 1 + Math.random(),
+    atkHitDone: false,
+    patrolTarget: 0,
+    dead: false,
+    dieDone: false,
+  });
+  const e = enemies[enemies.length - 1];
+  e.patrolTarget = clampToWorld(e.x + (Math.random() < 0.5 ? -1 : 1) * (180 + Math.random() * 260));
+}
+function margin2() { return 60; }
+function clampToWorld(x) { return Math.max(60, Math.min(worldW - 60, x)); }
+
+function damageEnemy(en, dmg, fromX) {
+  if (en.state === 'die') return;
+  en.hp -= dmg;
+  en.flashT = 0.3;
+  if (en.hp <= 0) {
+    en.state = 'die';
+    en.animTime = 0;
+    en.dieDone = false;
+    playSound('enemy_die');   // 血归零、切 die 的瞬间（死亡音优先）
+    return;
+  }
+  playSound('enemy_hurt');    // 受击、血量减少的瞬间
+  en.state = 'hurt';
+  en.animTime = 0;
+  en.hurtT = ANIM.enemyHurt.frames / ANIM.enemyHurt.fps;
+  en.vx = (en.x < fromX ? -1 : 1) * ENEMY_HURT_KB;
+}
+
+function enemiesUpdate(dt) {
+  // 数量控制：滑块调低时移除最远的多余敌人
+  while (enemies.length > DEBUG.maxEnemies) {
+    let idx = -1, best = -1;
+    for (let i = 0; i < enemies.length; i++) {
+      if (enemies[i].state === 'die') continue;
+      const d = Math.abs(enemies[i].x - player.x);
+      if (d > best) { best = d; idx = i; }
+    }
+    if (idx === -1) break;
+    enemies.splice(idx, 1);
+  }
+
+  // 生成控制
+  spawnTimer -= dt;
+  if (enemies.length < DEBUG.maxEnemies && spawnTimer <= 0) {
+    spawnEnemy();
+    spawnTimer = 2.5;
+  }
+
+  const pBox = playerBodyBox();
+  const pAtk = playerAttackBox();
+
+  for (const en of enemies) {
+    if (en.flashT > 0) en.flashT -= dt;
+    en.animTime += dt;
+
+    if (en.state === 'die') {
+      const n = ASSETS.enemy.die.length;
+      if (Math.floor(en.animTime * ANIM.enemyDie.fps) >= n) en.dieDone = true;
+      en.vx = 0;
+    } else if (en.state === 'hurt') {
+      en.hurtT -= dt;
+      en.vx *= Math.max(0, 1 - 4 * dt);
+      if (en.hurtT <= 0) { en.state = 'walk'; en.animTime = 0; }
+    } else if (en.state === 'attack') {
+      const n = ASSETS.enemy.attack.length;
+      const done = Math.floor(en.animTime * ANIM.enemyAttack.fps) >= n;
+      en.vx *= Math.max(0, 1 - 8 * dt);
+      if (done) {
+        en.state = 'walk';
+        en.animTime = 0;
+        en.atkCd = ENEMY_ATTACK_CD;
+        en.atkHitDone = false;
+      }
+    } else {
+      // walk：巡逻 + 索敌
+      en.atkCd = Math.max(0, en.atkCd - dt);
+      const dx = player.x - en.x;
+      const adx = Math.abs(dx);
+      const playerClose = !player.dead && adx < ENEMY_ATTACK_RANGE && Math.abs(player.y - en.y) < 120;
+
+      if (playerClose && en.atkCd <= 0) {
+        en.facing = dx > 0 ? 1 : -1;
+        en.state = 'attack';
+        en.animTime = 0;
+        en.atkHitDone = false;
+      } else {
+        // 玩家很近时停下面向玩家，否则朝巡逻点走
+        if (adx < 150 && !player.dead) {
+          en.facing = dx > 0 ? 1 : -1;
+        } else {
+          const d = en.patrolTarget - en.x;
+          if (Math.abs(d) < 12) {
+            en.patrolTarget = clampToWorld(en.x + (Math.random() < 0.5 ? -1 : 1) * (180 + Math.random() * 260));
+          } else {
+            en.facing = d > 0 ? 1 : -1;
+            en.vx = en.facing * ENEMY_SPEED;
+          }
+        }
+      }
+    }
+
+    // 物理
+    en.vy += GRAVITY * dt;
+    en.x += en.vx * dt;
+    en.y += en.vy * dt;
+    const groundY = DEBUG.platformY;
+    if (en.y >= groundY) {
+      en.y = groundY;
+      en.vy = 0;
+    }
+    en.x = clampToWorld(en.x);
+
+    // 玩家攻击盒命中敌人
+    if (pAtk && en.state !== 'die' && player.segHits && !player.segHits[pAtk.seg].has(en.id)) {
+      if (rectsOverlap(pAtk, enemyBodyBox(en))) {
+        const atk = ATTACKS[player.state];
+        player.segHits[pAtk.seg].add(en.id);
+        damageEnemy(en, atk.dmg, player.x);
+      }
+    }
+    // 敌人攻击盒命中玩家
+    const eAtk = enemyAttackBox(en);
+    if (eAtk && !en.atkHitDone && !player.dead && player.invulnT <= 0) {
+      if (rectsOverlap(eAtk, pBox)) {
+        en.atkHitDone = true;
+        damagePlayer(ENEMY_ATTACK.dmg, en.x);
+      }
+    }
+  }
+
+  // 移除死亡播完的敌人
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    if (enemies[i].state === 'die' && enemies[i].dieDone) enemies.splice(i, 1);
+  }
+}
+
+// ============================================================
+// 第五块：主循环、相机、背景绘制、调试模式渲染
+// ============================================================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let cameraX = 0;
+let lastTime = performance.now();
+let acc = 0;
+let fps = 60;
+let frameCount = 0;
+let fpsTimer = 0;
+let started = false;
+
+function update(dt) {
+  playerUpdate(dt);
+  updateFootsteps(dt);   // 脚步声计时（walk 0.5s / run 0.3s，非移动状态停止）
+  enemiesUpdate(dt);
+
+  // 相机平滑跟随，限制在背景宽度内
+  const target = player.x - CANVAS_W / 2;
+  const k = Math.min(1, 6 * dt);
+  cameraX += (target - cameraX) * k;
+  if (worldW <= CANVAS_W) {
+    cameraX = (worldW - CANVAS_W) / 2;
+  } else {
+    cameraX = Math.max(0, Math.min(worldW - CANVAS_W, cameraX));
+  }
+}
+
+// 两层视差背景：每层按画布高度等比缩放、横向无缝平铺、按各自速度随相机滚动
+function drawParallaxLayer(img, speed) {
+  if (!img || !img.complete || img.naturalWidth <= 0 || img.naturalHeight <= 0) return;
+  const dw = img.naturalWidth * (CANVAS_H / img.naturalHeight);   // 按画布高度等比缩放后的宽
+  const offsetX = -cameraX * speed;                               // 偏移 = -camera.x * speed
+  for (let x = offsetX; x < CANVAS_W; x += dw) {
+    ctx.drawImage(img, x, 0, dw, CANVAS_H);                       // 从 offsetX 起平铺至覆盖全宽
+  }
+}
+
+function drawParallaxBackground() {
+  const anyReady = [bgFar, bgNear].some(
+    img => img && img.complete && img.naturalWidth > 0 && img.naturalHeight > 0
+  );
+  if (!anyReady) {   // 兜底：两层均未加载成功时画渐变 + 立柱
+    const g = ctx.createLinearGradient(0, 0, 0, CANVAS_H);
+    g.addColorStop(0, '#1a2333');
+    g.addColorStop(1, '#0c0f14');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    for (let i = 0; i < 24; i++) {
+      const wx = i * 220 - (cameraX % 220);
+      ctx.fillRect(wx, 120, 8, 400);
+    }
+    return;
+  }
+  drawParallaxLayer(bgFar, 0.25);    // 远景：速度 0.25
+  drawParallaxLayer(bgNear, 1.0);    // 近景：速度 1.0
+}
+
+function drawShadow(x, y, groundY, baseW) {
+  const air = Math.max(0, groundY - y);
+  const t = Math.max(0, 1 - air / 320);
+  const w = baseW * (0.5 + 0.5 * t);
+  const alpha = 0.12 + 0.28 * t;
+  ctx.save();
+  ctx.translate(x, groundY + 6);
+  ctx.scale(1, 0.28);
+  ctx.beginPath();
+  ctx.arc(0, 0, w / 2, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,' + alpha.toFixed(3) + ')';
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawSprite(x, y, facing, img, scale) {
+  const dw = 1024 * scale, dh = 1024 * scale;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(facing, 1);
+  if (img && img.complete && img.naturalWidth > 0) {
+    ctx.drawImage(img, -dw / 2, -dh, dw, dh);
+  } else {
+    ctx.fillStyle = 'rgba(120,120,120,0.5)';
+    ctx.fillRect(-dw / 2, -dh, dw, dh);
+  }
+  ctx.restore();
+}
+
+function flashOverlay(x, y, w, h, t) {
+  if (t <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = Math.min(0.5, t * 1.6);
+  ctx.fillStyle = '#ff2222';
+  ctx.fillRect(x, y, w, h);
+  ctx.restore();
+}
+
+function playerAnimName() {
+  return player.state;
+}
+
+function playerAnimFrames() {
+  const n = playerAnimName();
+  return ASSETS.player[n];
+}
+
+function render() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // 两层视差背景（远→近），玩家/敌人在其后绘制
+  drawParallaxBackground();
+
+  // 平台（视觉地面：仅深色填充；棕色顶边已移入 renderDebug，仅调试时显示）
+  ctx.fillStyle = 'rgba(30,26,22,0.85)';
+  ctx.fillRect(0, DEBUG.platformY, CANVAS_W, CANVAS_H - DEBUG.platformY);
+
+  // 影子 + 角色
+  const groundY = DEBUG.platformY;
+  for (const en of enemies) {
+    drawShadow(en.x - cameraX, en.y, groundY, 70 * DEBUG.enemySize);
+  }
+  drawShadow(player.x - cameraX, player.y, groundY, 70);
+
+  for (const en of enemies) {
+    const animName = en.state;                 // walk / attack / hurt / die
+    const frames = ASSETS.enemy[animName];
+    const def = ANIM['enemy' + animName.charAt(0).toUpperCase() + animName.slice(1)];
+    const n = frames ? frames.length : 1;
+    const f = Math.floor(en.animTime * def.fps);
+    const idx = def.loop ? f % n : Math.min(f, n - 1);
+    drawSprite(en.x - cameraX, en.y, en.facing, getFrame(frames, idx), ENEMY_SCALE);
+    const w = ENEMY_BASE_W * DEBUG.enemySize, h = ENEMY_BASE_H * DEBUG.enemySize;
+    flashOverlay(en.x - cameraX - w / 2, en.y - h, w, h, en.flashT);
+  }
+
+  {
+    const frames = playerAnimFrames();
+    const n = frames ? frames.length : 1;
+    const def = ANIM[playerAnimName()];
+    const f = Math.floor(player.animTime * def.fps);
+    const idx = def.loop ? f % n : Math.min(f, n - 1);
+    drawSprite(player.x - cameraX, player.y, player.facing, getFrame(frames, idx), PLAYER_SCALE);
+    const w = DEBUG.playerW, h = DEBUG.playerH;
+    flashOverlay(player.x - cameraX - w / 2, player.y - h, w, h, player.flashT);
+  }
+
+  // 左上角人物血条（常驻显示）
+  {
+    const bx = 16, by = 12, bw = 180, bh = 16;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(bx - 3, by - 3, bw + 6, bh + 6);
+    ctx.fillStyle = '#3a1212';
+    ctx.fillRect(bx, by, bw, bh);
+    const ratio = Math.max(0, player.hp / player.maxHp);
+    ctx.fillStyle = ratio > 0.5 ? '#39d44a' : ratio > 0.25 ? '#e6b93c' : '#e04040';
+    ctx.fillRect(bx, by, bw * ratio, bh);
+    ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '11px Consolas, monospace';
+    ctx.fillText('HP ' + Math.ceil(player.hp) + '/' + player.maxHp, bx + bw + 10, by + 12);
+  }
+
+  // 死亡结算：播完最后一帧后显示 GAME OVER，按 R 重开
+  if (player.dieDone) {
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ff5555';
+    ctx.font = 'bold 44px Consolas, monospace';
+    ctx.fillText('GAME OVER', CANVAS_W / 2, CANVAS_H / 2 - 20);
+    ctx.fillStyle = '#cccccc';
+    ctx.font = '18px Consolas, monospace';
+    ctx.fillText('按 R 重新开始', CANVAS_W / 2, CANVAS_H / 2 + 24);
+    ctx.textAlign = 'left';
+  }
+
+  if (DEBUG.enabled) renderDebug();
+}
+
+function renderDebug() {
+  ctx.save();
+  // 棕色地面顶边（原为 render 常驻，现仅调试时显示）
+  ctx.fillStyle = 'rgba(90,80,64,0.9)';
+  ctx.fillRect(0, DEBUG.platformY, CANVAS_W, 4);
+
+  // 亮绿平台线
+  ctx.strokeStyle = '#39ff5a';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, DEBUG.platformY);
+  ctx.lineTo(CANVAS_W, DEBUG.platformY);
+  ctx.stroke();
+
+  // 蓝色玩家盒
+  const pb = playerBodyBox();
+  ctx.strokeStyle = '#33aaff';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(pb.x - cameraX, pb.y, pb.w, pb.h);
+
+  // 红色敌人盒
+  ctx.strokeStyle = '#ff4444';
+  for (const en of enemies) {
+    const b = enemyBodyBox(en);
+    ctx.strokeRect(b.x - cameraX, b.y, b.w, b.h);
+  }
+
+  // 橙红攻击盒
+  ctx.strokeStyle = '#ff6a1f';
+  const pa = playerAttackBox();
+  if (pa) ctx.strokeRect(pa.x - cameraX, pa.y, pa.w, pa.h);
+  for (const en of enemies) {
+    const ea = enemyAttackBox(en);
+    if (ea) ctx.strokeRect(ea.x - cameraX, ea.y, ea.w, ea.h);
+  }
+
+  // 左上角实时数据（血条下方）
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(8, 42, 250, 148);
+  ctx.fillStyle = '#7fff9f';
+  ctx.font = '12px Consolas, monospace';
+  const lines = [
+    'FPS: ' + fps.toFixed(1),
+    'player: ' + player.state + '  hp:' + player.hp,
+    'pos: ' + player.x.toFixed(0) + ', ' + player.y.toFixed(0),
+    'vel: ' + player.vx.toFixed(0) + ', ' + player.vy.toFixed(0),
+    'facing: ' + (player.facing > 0 ? 'R' : 'L'),
+    'enemies: ' + enemies.length + ' / ' + DEBUG.maxEnemies,
+    'platformY: ' + DEBUG.platformY,
+    'enemySize: ' + DEBUG.enemySize.toFixed(2),
+    'cam: ' + cameraX.toFixed(0) + '  worldW: ' + worldW.toFixed(0),
+    'keys: ' + Object.keys(keys).filter(k => keys[k]).join(' '),
+  ];
+  for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], 16, 60 + i * 13);
+  ctx.restore();
+}
+
+// 调试滑块：实时生效
+function bindSlider(id, valId, apply) {
+  const el = document.getElementById(id);
+  const valEl = document.getElementById(valId);
+  el.addEventListener('input', () => {
+    const v = parseFloat(el.value);
+    apply(v);
+    valEl.textContent = (Math.abs(v) < 10 && v % 1 !== 0) ? v.toFixed(2) : String(v);
+  });
+}
+bindSlider('dbg-platformY', 'val-platformY', v => {
+  DEBUG.platformY = v;
+  // 已在空中的角色保持空中，落回新平台顶
+  if (player.y > DEBUG.platformY) { player.y = DEBUG.platformY; player.vy = 0; }
+  for (const en of enemies) if (en.y > DEBUG.platformY) { en.y = DEBUG.platformY; en.vy = 0; }
+});
+bindSlider('dbg-playerW', 'val-playerW', v => { DEBUG.playerW = v; });
+bindSlider('dbg-playerH', 'val-playerH', v => { DEBUG.playerH = v; });
+bindSlider('dbg-enemySize', 'val-enemySize', v => { DEBUG.enemySize = v; });
+bindSlider('dbg-maxEnemies', 'val-maxEnemies', v => { DEBUG.maxEnemies = v; });
+
+function loop(now) {
+  requestAnimationFrame(loop);
+  let ft = (now - lastTime) / 1000;
+  lastTime = now;
+  if (ft > 0.25) ft = 0.25;
+  acc += ft;
+  while (acc >= FIXED_DT) {
+    update(FIXED_DT);
+    acc -= FIXED_DT;
+  }
+  // FPS 统计
+  frameCount++;
+  fpsTimer += ft;
+  if (fpsTimer >= 0.5) {
+    fps = frameCount / fpsTimer;
+    frameCount = 0;
+    fpsTimer = 0;
+  }
+  render();
+}
+
+// 全部素材加载完再启动
+loadAll().then(() => {
+  computeWorldW();
+  resetPlayer();
+  document.getElementById('loading').classList.add('done');
+  if (!started) {
+    started = true;
+    lastTime = performance.now();
+    requestAnimationFrame(loop);
+  }
+});
+</script>
+</body>
+</html>
