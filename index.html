@@ -272,8 +272,8 @@ function playSound(name) {
   if (p && typeof p.catch === 'function') p.catch(() => {});   // 吞掉浏览器自动播放拒绝
 }
 
-// 脚步声：走路每 0.5s、跑步每 0.3s；非 walk/run（含 idle）时停止
-const FOOTSTEP_INTERVAL = { walk: 0.5, run: 0.3 };
+// 脚步声：走路每 0.5s、跑步每 0.5s；非 walk/run（含 idle）时停止
+const FOOTSTEP_INTERVAL = { walk: 0.5, run: 0.5 };
 let footstepTimer = 0;
 function updateFootsteps(dt) {
   if (player.state !== 'walk' && player.state !== 'run') { footstepTimer = 0; return; }
@@ -725,7 +725,7 @@ let started = false;
 
 function update(dt) {
   playerUpdate(dt);
-  updateFootsteps(dt);   // 脚步声计时（walk 0.5s / run 0.3s，非移动状态停止）
+  updateFootsteps(dt);   // 脚步声计时（walk 0.5s / run 0.5s，非移动状态停止）
   enemiesUpdate(dt);
 
   // 相机平滑跟随，限制在背景宽度内
