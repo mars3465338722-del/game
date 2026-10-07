@@ -486,7 +486,12 @@ function playerUpdate(dt) {
     const n = ASSETS.player[player.state].length;
     const f = Math.floor(player.animTime * def.fps);
     player.vx *= Math.max(0, 1 - 6 * dt);
-    if (f >= n) { player.state = player.onGround ? groundStateFromSpeed() : (player.vy < 0 ? 'jump_up' : 'jump_down'); player.animTime = 0; }
+    if (f >= n) {
+      // 对应攻击键仍按着时从头重播（不切 idle，不插入 idle 帧）；松开才切回地面状态
+      const heldKey = player.state === 'attack1' ? keys.KeyJ : player.state === 'attack2' ? keys.KeyK : keys.KeyL;
+      if (heldKey) { player.animTime = 0; }
+      else { player.state = player.onGround ? groundStateFromSpeed() : (player.vy < 0 ? 'jump_up' : 'jump_down'); player.animTime = 0; }
+    }
   } else if (player.state === 'trans_idle_to_run') {
     const n = ASSETS.player.trans_idle_to_run.length;
     const f = Math.floor(player.animTime * ANIM.trans_idle_to_run.fps);
