@@ -489,7 +489,10 @@ function playerUpdate(dt) {
     if (f >= n) {
       // 对应攻击键仍按着时从头重播（不切 idle，不插入 idle 帧）；松开才切回地面状态
       const heldKey = player.state === 'attack1' ? keys.KeyJ : player.state === 'attack2' ? keys.KeyK : keys.KeyL;
-      if (heldKey) { player.animTime = 0; }
+      if (heldKey) {
+        player.animTime = 0;
+        playSound(player.state);   // 重播时补播对应攻击音效（修复 v0.1.8 后按住攻击键后续攻击无声）
+      }
       else { player.state = player.onGround ? groundStateFromSpeed() : (player.vy < 0 ? 'jump_up' : 'jump_down'); player.animTime = 0; }
     }
   } else if (player.state === 'trans_idle_to_run') {
