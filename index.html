@@ -73,6 +73,38 @@
     font-size: 11px;
     margin-top: 6px;
   }
+  /* ===== 触屏虚拟按键（仅手机/平板竖屏显示：屏幕宽度 < 768px） ===== */
+  #touch-controls {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: none;
+    justify-content: space-between;
+    align-items: flex-end;
+    padding: 12px;
+    z-index: 20;
+    pointer-events: none;
+  }
+  .pad-group { display: flex; gap: 12px; }
+  .pad-right { display: grid; grid-template-columns: repeat(2, min(72px, 16vw)); grid-auto-rows: min(72px, 16vw); gap: 10px; }
+  .touch-btn {
+    width: min(72px, 16vw);
+    height: min(72px, 16vw);
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.55);
+    background: rgba(255, 255, 255, 0.15);
+    color: rgba(255, 255, 255, 0.85);
+    font-family: inherit;
+    font-size: 14px;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    pointer-events: auto;
+  }
+  .touch-btn.held { background: rgba(255, 255, 255, 0.35); }
+  @media (max-width: 767px) { #touch-controls { display: flex; } }
 </style>
 </head>
 <body>
@@ -105,6 +137,21 @@
       <input type="range" id="dbg-maxEnemies" min="1" max="10" step="1" value="1">
     </div>
     <div class="hint">调试图形仅为可视化叠加，不影响物理和碰撞；滑块调整实时生效。</div>
+  </div>
+
+  <!-- 触屏虚拟按键：仅屏幕宽度 < 768px 时显示（CSS 媒体查询），半透明覆盖在游戏画面下方两侧 -->
+  <div id="touch-controls">
+    <div class="pad-group pad-left">
+      <button type="button" class="touch-btn" data-key="KeyA">左移</button>
+      <button type="button" class="touch-btn" data-key="KeyD">右移</button>
+    </div>
+    <div class="pad-group pad-right">
+      <button type="button" class="touch-btn" data-key="Space">跳跃</button>
+      <button type="button" class="touch-btn" data-key="dodge">闪避</button>
+      <button type="button" class="touch-btn" data-key="KeyJ">攻击1</button>
+      <button type="button" class="touch-btn" data-key="KeyK">攻击2</button>
+      <button type="button" class="touch-btn" data-key="KeyL">攻击3</button>
+    </div>
   </div>
 
 <script>
@@ -574,6 +621,34 @@ window.addEventListener('keydown', e => {
 });
 window.addEventListener('keyup', e => { keys[e.code] = false; });
 window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });  // 窗口失焦时清空按键（修复按 Alt 等导致按键卡死、动不了的问题）
+
+// ============================================================
+// 触屏虚拟按键：每个按键映射到与键盘完全相同的 keys 状态 / 游戏逻辑
+// 显示由 CSS 媒体查询控制（屏幕宽度 < 768px 才显示）；支持多点触控（按 changedTouches 逐指处理）
+// ============================================================
+const touchPad = document.getElementById('touch-controls');
+if (touchPad) {
+  const setTouchBtn = (btn, on) => {
+    btn.classList.toggle('held', on);
+    const k = btn.dataset.key;
+    if (k === 'dodge') {
+      // 闪避为一次性触发（等价于 Shift+方向）：有方向键按住时向前闪避，否则向后闪避
+      if (on) (keys.KeyD || keys.KeyA) ? startDodge('dodge_forward') : startDodge('dodge_backward');
+      return;
+    }
+    keys[k] = on;                                          // KeyA/KeyD/Space/KeyJ/KeyK/KeyL 与键盘完全相同
+    if (on && (k === 'KeyA' || k === 'KeyD')) registerTap(k);   // 双击跑动，与键盘逻辑一致
+  };
+  const handleTouches = e => {
+    for (const t of e.changedTouches) {
+      const btn = (t.target && t.target.closest) ? t.target.closest('.touch-btn') : null;
+      if (btn) setTouchBtn(btn, e.type === 'touchstart');
+    }
+  };
+  touchPad.addEventListener('touchstart', e => { e.preventDefault(); handleTouches(e); }, { passive: false });  // preventDefault 防止页面滚动/缩放
+  touchPad.addEventListener('touchend', handleTouches);
+  touchPad.addEventListener('touchcancel', handleTouches);
+}
 
 // ============================================================
 // 第四块：敌人 AI、碰撞检测、受击反馈
